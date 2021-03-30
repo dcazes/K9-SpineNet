@@ -1,0 +1,229 @@
+from numpy.core.fromnumeric import mean
+import pandas as pd
+import glob
+import os
+from keras import models, layers
+import numpy as np
+from PIL import Image, ImageOps
+import datetime
+from keras.utils.vis_utils import plot_model
+from keras.backend import clear_session
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix as cfm
+from talos import Scan
+
+def import_imgs(fp):
+    fps = []
+    imgs = []
+
+    data_dirs = [name for name in os.listdir('Data')]
+    print ("Case Directories Found: ", data_dirs)
+    for dir in data_dirs:
+        input_dir = os.path.join('Data', dir, dir, fp)
+        print("Searching for images in: ", input_dir)
+
+        #Find all JPG  in case filepaths
+        for file in glob.glob(os.path.join(input_dir, "*.jpg")):
+            fps.append(file)
+
+        #Load all found filepaths
+        for file in range(len(fps)):
+            
+            imgs.append(ImageOps.grayscale(Image.open(fps[file])))
+
+        print("Dataset Size: ", len(imgs))
+        #print(imgs)
+
+    return imgs
+
+#Functions
+
+def load_model(x_train, y_train, x_val, y_val, h_pars):
+
+    time_stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    dir_path = os.path.join(h_pars['exp_dir'], time_stamp)
+    os.mkdir(dir_path)
+
+    model = models.Sequential()
+    model.add(layers.MaxPooling2D((h_pars['pooling_size'],  h_pars['pooling_size']), input_shape = (512,512, 1)))
+
+    model.add(layers.BatchNormalization())
+    model.add(layers.Conv2D(filters = h_pars['filters_1'], kernel_size = h_pars['kernel_1'], strides = h_pars['strides'], padding = h_pars['padding']))
+    model.add(layers.LeakyReLU(alpha = h_pars['alpha']))
+
+    model.add(layers.MaxPooling2D((h_pars['pooling_size'],  h_pars['pooling_size'])))
+
+    model.add(layers.BatchNormalization())
+    model.add(layers.Conv2D(filters = h_pars['filters_2'], kernel_size = h_pars['kernel_2'], strides = h_pars['strides'], padding = h_pars['padding']))
+    model.add(layers.LeakyReLU(alpha = h_pars['alpha']))
+
+    model.add(layers.MaxPooling2D(( h_pars['pooling_size'],  h_pars['pooling_size'])))
+
+    model.add(layers.BatchNormalization())
+    model.add(layers.Conv2D(filters = h_pars['filters_3'], kernel_size = h_pars['kernel_3'], strides = h_pars['strides'], padding = h_pars['padding']))
+    model.add(layers.LeakyReLU(alpha = h_pars['alpha']))
+
+    model.add(layers.Flatten())
+
+    model.add(layers.Dropout(h_pars['dropout']))
+
+    model.add(layers.Dense(units = h_pars['dense_units']))
+    model.add(layers.LeakyReLU(alpha = h_pars['alpha']))
+    model.add(layers.Dense(units = 1, activation = 'sigmoid'))
+
+    model.compile(optimizer = "adam", loss = "binary_crossentropy", metrics=['binary_accuracy'])
+
+    hist = model.fit(x = x_train, y = y_train, validation_split = 0.2, epochs = 3, batch_size = h_pars['batch_size'])
+
+    #os.mkdir(dir_path)
+
+    plot_model(model, to_file = os.path.join(dir_path, 'model_struct.png') , show_shapes=True, show_layer_names=True)
+
+    evaluate_model(dir_path, model, x_val, y_val)
+
+    hpar_file = pd.DataFrame([['filt1', h_pars['filters_1']], 
+                            ['filt2', h_pars['filters_2']], 
+                            ['filt3', h_pars['filters_3']], 
+                            ['kern1', h_pars['kernel_1']], 
+                            ['kern2', h_pars['kernel_2']], 
+                            ['kern3', h_pars['kernel_3']], 
+                            ['strides', h_pars['strides']],
+                            ['dropout', h_pars['dropout']], 
+                            ['pooling_size', h_pars['pooling_size']], 
+                            ['dense_units', h_pars['dense_units']], 
+                            ['alpha', h_pars['alpha']],
+                            ['batch_size', h_pars['batch_size']],
+                            ['padding', h_pars['padding']]])
+    
+    hpar_file.to_csv(os.path.join(dir_path, 'hyper_params.csv'))
+    
+    clear_session()
+
+    return hist, model
+
+def label_data(ims, label, prev_im, prev_label):
+    if prev_im == None:
+        prev_im = []
+        prev_label = []
+        for im in ims:
+            prev_im.append(im)
+            prev_label.append(int(label))
+    else:
+        for im in ims:
+            prev_im.append(im)
+            prev_label.append(int(label))
+    return prev_im, prev_label
+
+def evaluate_model(exp_dir, model, eval_imgs, labels):
+    preds = pd.DataFrame(model.predict(eval_imgs, verbose = 1))
+    
+    for i in np.arange(0.2, 0.9, 0.1):
+        
+        thresh = np.where(preds> i, 1, 0)
+        i = "{:.1f}".format(i)
+        #preds[i] = thresh
+        
+        tn, fp, fn, tp = cfm(labels, thresh).ravel()
+        
+        accuracy = [(tp + tn)/(tp + fp + tn + fn)]
+        #cfm_metrics['accuracy'].append([accuracy])
+
+        #cfm_metrics['thresh'].append([i])
+
+        precision = [(tp/(tp + fp))]
+        #cfm_metrics['precision'].append([precision])
+
+        recall = [(tp/(tp + fn))]
+        #cfm_metrics['recall'].append([recall])
+        pd.DataFrame({'recall': accuracy, 
+                            'precision': precision,
+                            'accuracy': recall, 
+                            'thresh': i,
+                            'model_no': exp_dir}).to_csv(os.path.join(exp_dir, 'confusion_matrix{}.csv'.format(i)))
+
+
+
+    #cfm_metrics.to_csv(os.path.join(exp_dir, f'confusion_matrix_.csv'))
+
+#####################################################
+#                                                   #
+#       Authors: Emily Deignan and Daniel Cazes     #
+#       Last Updated: March 21, 2021                #
+#       Function: ML algorithm for segmenting       #
+#                 spinal ROI                        #
+#                                                   #
+#####################################################
+
+#Initialize Variables
+timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+input_dir = "Data"
+experiment_dir = os.path.join("output", 'Other_Params')
+output_dirs = ["Model_Details", "Model_Results"]
+
+h_pars = {'filters_1': [10],
+          'filters_2': [20],
+          'filters_3': [40],
+          'kernel_1': [50],
+          'kernel_2': [20],
+          'kernel_3': [15],
+          'pooling_size': [2, 3, 4],
+          'dense_units': [500], 
+          'strides': [3],
+          'dropout': [0.2, 0.1, 0.3],
+          'alpha': [0.3, 0.2, 0.4],
+          'batch_size': [27],
+          'padding': ["same"], #"valid"
+          'exp_dir': [experiment_dir]}
+
+
+#find image paths
+nor_path =os.path.join("Images", "Normal")
+abn_path =os.path.join("Images", "Abnormal")
+
+#Create Experiment Folder
+os.mkdir(experiment_dir)
+print ("Finding Image File Paths")
+nor_imgs = import_imgs(nor_path)
+abn_imgs= import_imgs(abn_path)
+
+combined_data, label = label_data(abn_imgs, 1, None, None)
+
+#trim_data = combined_data
+combined_data, label= label_data(nor_imgs[4000:5580], 0, combined_data, label)
+
+input_data = []
+
+for i in range(len(combined_data)):
+    input_data.append(np.array(combined_data[i]))
+
+#input_data = np.array(input_data)
+input_data = np.array(input_data).reshape(-1, 512, 512, 1)
+
+x_train, x_val, y_train, y_val = train_test_split(input_data, label, test_size = 0.2)
+
+x_train = np.array(x_train)
+y_train = np.array(y_train)
+x_test = np.array(x_val)
+y_test = np.array(y_val)
+
+img_shape = x_train[0].shape
+print("Input Shape: ", img_shape)
+print("Number of Samples in Training:", len(x_train))
+print("Number of Samples in Testing:", len(x_test))
+
+h = Scan(x = x_train, 
+             y = y_train, 
+             params = h_pars, 
+             model = load_model,
+             experiment_name=experiment_dir, 
+             x_val = x_val, 
+             y_val = y_val, 
+             print_params = True)
+
+#mod, hist = load_model(x_train, y_train, x_val, y_val)
+
+all_filenames = [i for i in glob.glob(os.path.join(experiment_dir, '*', 'confusion_matrix*.csv'))]
+combined_csv = pd.concat([pd.read_csv(f) for f in all_filenames ])
+combined_csv.to_csv(os.path.join(experiment_dir, 'combined_metrics.csv'))
+
+print("Script Completed Successfully")
